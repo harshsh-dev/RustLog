@@ -1,16 +1,18 @@
+/// Returns true when `line` should be emitted for the given `keyword`.
+#[inline]
+pub fn line_matches(line: &str, keyword: &str) -> bool {
+    line.contains(keyword)
+}
+
 /// Filters lines from a vector of strings based on a keyword.
-/// Returns a new vector containing only the lines that contain the keyword.
-use std::vec::Vec;
+/// Prefer streaming APIs such as [`crate::reader::for_each_matching_line`] for large files.
 pub fn filter_lines(lines: Vec<String>, keyword: &str) -> Vec<String> {
     lines
         .into_iter()
-        .filter(|line| line.contains(keyword))
+        .filter(|line| line_matches(line, keyword))
         .collect()
 }
 
-
-/// Tests for the filter_lines function.
-/// This module contains unit tests to ensure the filtering functionality works as expected.
 #[cfg(test)]
 mod tests {
     use super::*;

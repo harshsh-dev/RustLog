@@ -24,9 +24,13 @@ async fn integration_tail_logs_correctly() {
         let path = path.clone();
         let running = running.clone();
         tokio::spawn(async move {
-            tail_file_async(path, tx, running).await.unwrap();
+            tail_file_async(path, tx, running, None).await.unwrap();
         })
     };
+
+    // Let the tail task open the (empty) file and seek to EOF before we append; otherwise we
+    // would attach after existing bytes and miss them — same semantics as `tail -f`.
+    tokio::time::sleep(Duration::from_millis(75)).await;
 
     // Write two lines to the file
     let mut file = OpenOptions::new()
@@ -46,7 +50,7 @@ async fn integration_tail_logs_correctly() {
     let timeout_duration = Duration::from_secs(2);
 
     while let Ok(Some(line)) = timeout(timeout_duration, rx.recv()).await {
-        println!("Received line: {:?}", line);
+        println!("Received line: {line:?}");
         if line.contains("something went wrong") {
             matched = true;
             break;

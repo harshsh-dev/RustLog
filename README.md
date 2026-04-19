@@ -1,129 +1,154 @@
-# 🦀 RustLog
+# RustLog
 
-A blazing-fast, modular CLI tool for filtering log files — written in Rust.  
-Built to scale from beginner CLI utilities to advanced log streaming with Kafka, plugins, and optional dashboards.
-
----
-
-## ✨ Features
-
-- 🔍 Filter log files by keyword (e.g. "ERROR")
-- 📡 Real-time log tailing (`--tail` mode)
-- ✨ Logging via `env_logger`
-- 🛑 Graceful shutdown on Ctrl+C
-- 🧪 Unit + CLI tests using `assert_cmd`, `tempfile`, etc.
-- 💼 Structured for modularity and easy scaling
+A small, fast CLI for **keyword filtering** on log files, with optional **`tail -f`–style** follow mode. Written in Rust with a clear split between a reusable library (`rustlog::run`) and a thin binary entrypoint. The longer-term idea is to grow toward streaming sinks (Kafka), config-driven rules, and richer tooling—without sacrificing efficiency on large files.
 
 ---
 
-## 🚀 Getting Started
+## Features
 
-### 📦 Prerequisites
-- [Install Rust](https://www.rust-lang.org/tools/install)
+- **Streaming filter mode** — reads line-by-line with **O(1)** memory in file size (no whole-file `Vec`).
+- **Tail mode (`--tail`)** — opens the file, **seeks to end of file**, then reads new lines (same idea as `tail -f`).
+- **Adaptive idle polling** — backoff from 8 ms up to 512 ms when no new data, so quiet logs use less CPU and active logs wake up quickly.
+- **Filter in the tail task** — only matching lines are sent on the async channel (less traffic and fewer allocations than filtering only in the consumer).
+- **Graceful shutdown** — Tokio `ctrl_c` handler stops the tail loop cleanly.
+- **Diagnostics** — [`tracing`](https://docs.rs/tracing) + [`tracing-subscriber`](https://docs.rs/tracing-subscriber) with `RUST_LOG` / env filter.
+- **Tests** — unit tests, integration tests, and CLI checks via `assert_cmd` and `tempfile`.
 
-### 🧑‍💻 Clone & Run
+---
+
+## Getting started
+
+### Prerequisites
+
+- [Rust toolchain](https://www.rust-lang.org/tools/install) (stable; this crate uses **edition 2024**)
+
+### Clone and run
 
 ```bash
 git clone https://github.com/HarshSharma009/RustLog.git
-cd rustlog
+cd RustLog/rustlog
 cargo build --release
-RUST_LOG=info cargo run -- ./sample/sample.log ERROR
+RUST_LOG=info cargo run --release -- ./sample/sample.log ERROR
 ```
-### 🔧 Sample Output
+
+### Example output
+
+You should see lines from the sample file that contain the keyword (via the `filtered` tracing target):
 
 ```text
 ERROR: Failed to connect
 ERROR: Timeout
 ```
 
-### Tailing Mode (--tail)
+### Tailing (`--tail`)
+
 ```bash
-RUST_LOG=info cargo run -- ./sample/sample.log ERROR --tail
+RUST_LOG=info cargo run --release -- ./sample/sample.log ERROR --tail
 ```
-#### Try this in a second terminal:
+
+In another terminal, append a line:
+
 ```bash
 echo "ERROR: Out of memory!" >> ./sample/sample.log
 ```
 
+Only **new** bytes after the process attached at EOF are streamed—same semantics as `tail -f`.
 
-### 🔬 Running Tests
+### Tests
 
 ```bash
+cd RustLog/rustlog
 cargo test
+cargo clippy --all-targets
 ```
 
 ---
 
-📁 Project Structure
-```python
-rustlog/
-├── src/
-│   ├── main.rs       # CLI entrypoint
-│   ├── args.rs       # CLI arguments with `clap`
-│   ├── reader.rs     # File reading logic
-│   ├── filter.rs     # Keyword filtering
-├── tests/
-│   ├── filter_tests.rs
-│   ├── cli_tests.rs
-│   └── tail_tests.rs
-├── sample/
-│   └── sample.log
-├── Cargo.toml
-└── README.md
+## Project layout
+
+```text
+RustLog/
+├── README.md                 # This file
+└── rustlog/
+    ├── Cargo.toml
+    ├── sample/
+    │   └── sample.log
+    ├── src/
+    │   ├── lib.rs            # `run()`, tracing setup, orchestration
+    │   ├── main.rs           # Thin `#[tokio::main]` → `rustlog::run()`
+    │   ├── args.rs           # CLI (`clap`)
+    │   ├── filter.rs         # Keyword match helper + `filter_lines` (tests / small batches)
+    │   ├── reader.rs         # Streaming `for_each_matching_line`, blocking `tail_file`
+    │   └── reader_async.rs   # Async `tail_file_async` (seek EOF + backoff)
+    └── tests/
+        ├── cli_tests.rs
+        ├── filter_tests.rs
+        ├── tail_tests.rs
+        └── tail_async.rs
 ```
+
 ---
 
-## 🧰 Built With
-- clap – for argument parsing
-- env_logger – for runtime logging
-- anyhow – for easy error handling
-- ctrlc – for graceful shutdown
-- assert_cmd – for CLI testing
-- tempfile – for temporary file-based testing
+## Built with
 
+| Crate | Role |
+|--------|------|
+| [`clap`](https://docs.rs/clap) | CLI parsing |
+| [`tokio`](https://docs.rs/tokio) | Async runtime (`rt-multi-thread`, `signal`, `fs`, `io-util`, `sync`, `time`, …) |
+| [`anyhow`](https://docs.rs/anyhow) | Error propagation in `run()` |
+| [`tracing`](https://docs.rs/tracing) / [`tracing-subscriber`](https://docs.rs/tracing-subscriber) | Structured logs and env filter |
+| [`assert_cmd`](https://docs.rs/assert_cmd) / [`predicates`](https://docs.rs/predicates) / [`tempfile`](https://docs.rs/tempfile) | **Dev-only** integration / CLI tests |
+
+---
 
 ## Roadmap
 
-| Feature                          | Status       |
-| -------------------------------- | ------------ |
-| Basic CLI with filter            | ✅ Done      |
-| Real-time tailing (`tail -f`)    | ✅ Done      |
-| Kafka output support             | 🔜           |
-| Configurable filters via `.toml` | 🔜           |
-| Plugin system for transforms     | 🔜           |
-| Web dashboard (Axum + WebSocket) | Optional 🚧  |
+| Feature | Status |
+|---------|--------|
+| Basic CLI keyword filter | Done |
+| Streaming read (bounded memory) | Done |
+| Real-time tail (`tail -f` semantics + async) | Done |
+| Kafka / other sinks | Planned |
+| Configurable rules (e.g. `.toml`) | Planned |
+| Plugins / transforms | Planned |
+| Optional web UI (e.g. Axum + WebSocket) | Optional |
 
+---
 
-## 📌 TODO (Optional Enhancements)
+## Possible enhancements
 
-- [ ] Async tailing with [`tokio`](https://docs.rs/tokio)
-- [ ] Output color-coded log levels (e.g., red for `ERROR`, yellow for `WARN`)
-- [ ] JSON log format support
-- [ ] Export filtered output to a new file (`--out <file>`)
+- Colorized levels (e.g. ERROR in red) in the terminal
+- JSON log parsing and field-based filters
+- `--out <file>` to write matches to a file
+- Filesystem **watch** integration (e.g. `notify`) to reduce or remove idle polling
 
-### 🧠 Learning Outcomes
-This project is part of a full roadmap to learn Rust like a pro:
+---
 
-- Ownership, Borrowing, Lifetimes
-- Modular architecture
-- Concurrency and async
-- Real-world crates and ecosystems
-- Extensibility patterns
+## Learning goals
 
+This repo is structured to exercise:
 
-## 🤝 Contributing
-Pull requests welcome!
-Feel free to fork and submit improvements or extensions.
+- Ownership, borrowing, and sensible buffer reuse
+- A **library + binary** crate layout (`pub` API vs CLI)
+- Sync I/O vs async I/O (`BufRead` / `AsyncBufRead`)
+- Channels, shutdown flags, and cooperative cancellation
 
+---
 
+## Contributing
 
-## 👨‍💻 Author
+Pull requests are welcome. Fork, branch, and open a PR with a short description of the change.
+
+---
+
+## Author
+
 **Harsh Sharma**  
 [GitHub](https://github.com/HarshSharma009) | [LinkedIn](https://www.linkedin.com/in/harsh-sharma-8a850b173/)  
-📧 harshsharma.ext@gmail.com
+[harshsharma.ext@gmail.com](mailto:harshsharma.ext@gmail.com)
 
-> _“Rusting my way through logs 🦀”_
+---
 
+## License
 
-## 📜 License
-GNU GENERAL PUBLIC LICENSE 
+GNU General Public License (see repository license file).

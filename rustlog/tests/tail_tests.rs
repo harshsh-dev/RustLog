@@ -24,7 +24,7 @@ fn tail_reads_new_lines() {
 
     // Spawn tail thread
     thread::spawn(move || {
-        tail_file(path_clone, tx, running_clone).unwrap();
+        tail_file(path_clone, tx, running_clone, None).unwrap();
     });
 
     // Append new line
