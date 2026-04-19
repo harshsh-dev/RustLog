@@ -1,18 +1,19 @@
 # RustLog
 
-A small, fast CLI for **keyword filtering** on log files, with optional **`tail -f`–style** follow mode. Written in Rust with a clear split between a reusable library (`rustlog::run`) and a thin binary entrypoint. The longer-term idea is to grow toward streaming sinks (Kafka), config-driven rules, and richer tooling—without sacrificing efficiency on large files.
+A Rust CLI and library for **filtering log files** (substring or regex, single or multi-pattern), **streaming** with bounded memory, optional **`tail -f`–style** follow mode, **TOML config**, optional **file sink**, **transform pipeline**, optional **WebSocket dashboard**, and an optional **Kafka** producer (behind `--features kafka`).
 
 ---
 
 ## Features
 
-- **Streaming filter mode** — reads line-by-line with **O(1)** memory in file size (no whole-file `Vec`).
-- **Tail mode (`--tail`)** — opens the file, **seeks to end of file**, then reads new lines (same idea as `tail -f`).
-- **Adaptive idle polling** — backoff from 8 ms up to 512 ms when no new data, so quiet logs use less CPU and active logs wake up quickly.
-- **Filter in the tail task** — only matching lines are sent on the async channel (less traffic and fewer allocations than filtering only in the consumer).
-- **Graceful shutdown** — Tokio `ctrl_c` handler stops the tail loop cleanly.
-- **Diagnostics** — [`tracing`](https://docs.rs/tracing) + [`tracing-subscriber`](https://docs.rs/tracing-subscriber) with `RUST_LOG` / env filter.
-- **Tests** — unit tests, integration tests, and CLI checks via `assert_cmd` and `tempfile`.
+- **Streaming I/O** — one-shot read and tail modes process line-by-line (`stream_file_lines_once` / `tail_file_async`).
+- **Matching** — `LineMatcher`: plain contains, regex, `any` / `all` modes (see TOML `[filters]`).
+- **Tail semantics** — async tail **seeks to EOF** before following; **adaptive idle backoff** (8 ms → 512 ms).
+- **Output** — tracing to stderr/stdout via `RUST_LOG`; optional **append-only file** (`-o` / `[output].file`).
+- **Config** — `-C/--config` merges `[source]`, `[filters]`, `[output]`, `[[transforms]]`, `[kafka]`, `[web]` with CLI overrides.
+- **Transforms** — pluggable steps (e.g. trim, prepend, strip prefix, regex replace).
+- **Web UI** — optional Axum + WebSocket dashboard (`--web` or `[web]`).
+- **Kafka** — optional `rdkafka` integration when built with `--features kafka` (needs system `librdkafka`).
 
 ---
 
@@ -20,39 +21,87 @@ A small, fast CLI for **keyword filtering** on log files, with optional **`tail 
 
 ### Prerequisites
 
-- [Rust toolchain](https://www.rust-lang.org/tools/install) (stable; this crate uses **edition 2024**)
+- [Rust](https://www.rust-lang.org/tools/install) (edition **2024**)
+- For Kafka builds: system **librdkafka** (e.g. `brew install librdkafka` on macOS)
 
-### Clone and run
+### Clone and build
 
 ```bash
-git clone https://github.com/HarshSharma009/RustLog.git
+git clone https://github.com/harshsh-dev/RustLog.git
 cd RustLog/rustlog
 cargo build --release
+```
+
+### Simple filter (two positionals)
+
+```bash
 RUST_LOG=info cargo run --release -- ./sample/sample.log ERROR
 ```
 
-### Example output
-
-You should see lines from the sample file that contain the keyword (via the `filtered` tracing target):
-
-```text
-ERROR: Failed to connect
-ERROR: Timeout
-```
-
-### Tailing (`--tail`)
+### Tailing
 
 ```bash
 RUST_LOG=info cargo run --release -- ./sample/sample.log ERROR --tail
 ```
 
-In another terminal, append a line:
+Append in another terminal:
 
 ```bash
 echo "ERROR: Out of memory!" >> ./sample/sample.log
 ```
 
-Only **new** bytes after the process attached at EOF are streamed—same semantics as `tail -f`.
+Only bytes **after** the process attached at EOF are followed (same idea as `tail -f`).
+
+### Write matches to a file (`-o` / `--out`)
+
+```bash
+cargo run --release -- ./sample/sample.log ERROR -o ./matches.log
+```
+
+CLI `-o` overrides `[output].file` from TOML when both are present.
+
+### Config file (`-C` / `--config`)
+
+```bash
+cargo run --release -- -C ./rustlog.toml
+```
+
+Example `rustlog.toml`:
+
+```toml
+[source]
+path = "./sample/sample.log"
+
+[filters]
+patterns = ["ERROR", "WARN"]
+use_regex = false
+mode = "any"
+
+[output]
+stdout = true
+# file = "./archive.log"
+
+[web]
+enabled = false
+# bind = "127.0.0.1:8080"
+
+[kafka]
+enabled = false
+```
+
+With config, you can omit positionals if `[source].path` and `[filters]` (or match-all empty patterns) are set; see `config::ResolvedConfig` in the crate.
+
+### Web dashboard
+
+```bash
+cargo run --release -- ./sample/sample.log ERROR --web 127.0.0.1:8080
+```
+
+### Kafka (optional feature)
+
+```bash
+cargo build --release --features kafka
+```
 
 ### Tests
 
@@ -68,23 +117,32 @@ cargo clippy --all-targets
 
 ```text
 RustLog/
-├── README.md                 # This file
+├── README.md
 └── rustlog/
     ├── Cargo.toml
     ├── sample/
     │   └── sample.log
     ├── src/
-    │   ├── lib.rs            # `run()`, tracing setup, orchestration
-    │   ├── main.rs           # Thin `#[tokio::main]` → `rustlog::run()`
-    │   ├── args.rs           # CLI (`clap`)
-    │   ├── filter.rs         # Keyword match helper + `filter_lines` (tests / small batches)
-    │   ├── reader.rs         # Streaming `for_each_matching_line`, blocking `tail_file`
-    │   └── reader_async.rs   # Async `tail_file_async` (seek EOF + backoff)
+    │   ├── lib.rs            # `run()` — wiring, Ctrl+C, reader + sinks + optional web/Kafka
+    │   ├── main.rs           # `rustlog::run()`
+    │   ├── args.rs           # Clap CLI
+    │   ├── config.rs         # TOML load + merge with CLI
+    │   ├── matcher.rs        # Line matching (substring / regex)
+    │   ├── filter.rs         # Legacy helpers + unit tests
+    │   ├── reader.rs         # Blocking helpers + `tail_file`
+    │   ├── reader_async.rs   # Async tail + one-shot stream
+    │   ├── sink.rs           # Stdout tracing + optional file append
+    │   ├── transform.rs      # Transform pipeline
+    │   ├── kafka_sink.rs     # Optional Kafka (feature `kafka`)
+    │   └── web_dashboard.rs  # Axum + WebSocket
     └── tests/
         ├── cli_tests.rs
         ├── filter_tests.rs
         ├── tail_tests.rs
-        └── tail_async.rs
+        ├── tail_async.rs
+        ├── stream_once_async.rs
+        ├── web_router.rs
+        └── kafka_cli_error.rs
 ```
 
 ---
@@ -93,45 +151,32 @@ RustLog/
 
 | Crate | Role |
 |--------|------|
-| [`clap`](https://docs.rs/clap) | CLI parsing |
-| [`tokio`](https://docs.rs/tokio) | Async runtime (`rt-multi-thread`, `signal`, `fs`, `io-util`, `sync`, `time`, …) |
-| [`anyhow`](https://docs.rs/anyhow) | Error propagation in `run()` |
-| [`tracing`](https://docs.rs/tracing) / [`tracing-subscriber`](https://docs.rs/tracing-subscriber) | Structured logs and env filter |
-| [`assert_cmd`](https://docs.rs/assert_cmd) / [`predicates`](https://docs.rs/predicates) / [`tempfile`](https://docs.rs/tempfile) | **Dev-only** integration / CLI tests |
+| `tokio` | Async runtime, I/O, channels, signals |
+| `clap` | CLI |
+| `anyhow` / `toml` / `serde` | Errors and config |
+| `regex` | Pattern matching |
+| `tracing` / `tracing-subscriber` | Diagnostics |
+| `axum` / `tower-http` | Web dashboard |
+| `rdkafka` (optional) | Kafka producer |
+
+Dev: `assert_cmd`, `predicates`, `tempfile`, `tower`, `http-body-util`.
 
 ---
 
 ## Roadmap
 
-| Feature | Status |
-|---------|--------|
-| Basic CLI keyword filter | Done |
-| Streaming read (bounded memory) | Done |
-| Real-time tail (`tail -f` semantics + async) | Done |
-| Kafka / other sinks | Planned |
-| Configurable rules (e.g. `.toml`) | Planned |
-| Plugins / transforms | Planned |
-| Optional web UI (e.g. Axum + WebSocket) | Optional |
-
----
-
-## Possible enhancements
-
-- Colorized levels (e.g. ERROR in red) in the terminal
-- JSON log parsing and field-based filters
-- `--out <file>` to write matches to a file
-- Filesystem **watch** integration (e.g. `notify`) to reduce or remove idle polling
-
----
-
-## Learning goals
-
-This repo is structured to exercise:
-
-- Ownership, borrowing, and sensible buffer reuse
-- A **library + binary** crate layout (`pub` API vs CLI)
-- Sync I/O vs async I/O (`BufRead` / `AsyncBufRead`)
-- Channels, shutdown flags, and cooperative cancellation
+| Area | Status |
+|------|--------|
+| CLI filter + tail | Done |
+| Streaming / bounded memory | Done |
+| TOML config + CLI merge | Done |
+| File output (`-o`, `[output].file`) | Done |
+| Transform pipeline | Done |
+| WebSocket dashboard | Done |
+| Kafka (optional feature) | Done (opt-in build) |
+| JSON field filters / structured logs | Planned |
+| Terminal colors by level | Planned |
+| Filesystem `notify` instead of polling | Planned |
 
 ---
 
@@ -144,11 +189,10 @@ Pull requests are welcome. Fork, branch, and open a PR with a short description 
 ## Author
 
 **Harsh Sharma**  
-[GitHub](https://github.com/HarshSharma009) | [LinkedIn](https://www.linkedin.com/in/harsh-sharma-8a850b173/)  
-[harshsharma.ext@gmail.com](mailto:harshsharma.ext@gmail.com)
+[GitHub](https://github.com/HarshSharma009) · [Repository](https://github.com/harshsh-dev/RustLog) · [LinkedIn](https://www.linkedin.com/in/harsh-sharma-8a850b173/) · [harshsharma.ext@gmail.com](mailto:harshsharma.ext@gmail.com)
 
 ---
 
 ## License
 
-GNU General Public License (see repository license file).
+GNU General Public License (see the license file in the repository).

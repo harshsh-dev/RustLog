@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use clap::Parser;
 
-/// Log reader: filter a file once or follow with `--tail`. Optional `--config` TOML merges with CLI.
+/// Log reader: filter a file once or follow with `--tail`. TOML `--config` and `-o/--out` merge with CLI.
 #[derive(Parser, Debug, Clone)]
 #[command(author, version, about)]
 pub struct Args {
@@ -21,6 +21,14 @@ pub struct Args {
     /// Follow the file for new lines (`tail -f` semantics).
     #[arg(short, long)]
     pub tail: bool,
+
+    /// Append matched lines to this file (overrides `[output].file` from config when set).
+    #[arg(short = 'o', long = "out", value_name = "FILE")]
+    pub out_file: Option<PathBuf>,
+
+    /// Listen address for the WebSocket dashboard (overrides `[web]` from config).
+    #[arg(long, value_name = "ADDR:PORT")]
+    pub web: Option<String>,
 }
 
 pub fn parse_args() -> Args {

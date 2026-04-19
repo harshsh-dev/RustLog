@@ -37,6 +37,28 @@ fn default_true() -> bool {
     true
 }
 
+/// Optional Kafka producer (`[kafka]` in TOML). Requires `--features kafka` when enabled.
+#[derive(Debug, Deserialize, Default, Clone)]
+pub struct KafkaSection {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub brokers: Vec<String>,
+    #[serde(default)]
+    pub topic: String,
+    #[serde(default)]
+    pub client_id: Option<String>,
+}
+
+/// Optional Axum + WebSocket dashboard (`[web]` or `--web`).
+#[derive(Debug, Deserialize, Default, Clone)]
+pub struct WebSection {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub bind: Option<String>,
+}
+
 impl Default for OutputSection {
     fn default() -> Self {
         Self {
@@ -57,6 +79,10 @@ pub struct FileConfig {
     pub output: OutputSection,
     #[serde(default)]
     pub transforms: Vec<TransformSpec>,
+    #[serde(default)]
+    pub kafka: KafkaSection,
+    #[serde(default)]
+    pub web: WebSection,
 }
 
 impl FileConfig {
@@ -75,6 +101,9 @@ pub struct ResolvedConfig {
     pub stdout: bool,
     pub output_file: Option<PathBuf>,
     pub transforms: Vec<TransformSpec>,
+    pub kafka: KafkaSection,
+    /// `Some("host:port")` when the dashboard should listen.
+    pub web_bind: Option<String>,
 }
 
 impl ResolvedConfig {
@@ -120,12 +149,35 @@ impl ResolvedConfig {
             .unwrap_or_default();
 
         let stdout = output.stdout;
-        let output_file = output.file.map(PathBuf::from);
+        let output_file = args
+            .out_file
+            .clone()
+            .or_else(|| output.file.as_ref().map(PathBuf::from));
 
         let transforms = file_cfg
             .as_ref()
             .map(|c| c.transforms.clone())
             .unwrap_or_default();
+
+        let kafka = file_cfg
+            .as_ref()
+            .map(|c| c.kafka.clone())
+            .unwrap_or_default();
+
+        let web = file_cfg
+            .as_ref()
+            .map(|c| c.web.clone())
+            .unwrap_or_default();
+
+        let web_bind = args.web.clone().or_else(|| {
+            if web.enabled {
+                web.bind
+                    .clone()
+                    .or_else(|| Some("127.0.0.1:8080".to_string()))
+            } else {
+                None
+            }
+        });
 
         Ok(Self {
             file_path: PathBuf::from(file_path),
@@ -133,6 +185,8 @@ impl ResolvedConfig {
             stdout,
             output_file,
             transforms,
+            kafka,
+            web_bind,
         })
     }
 }
@@ -149,6 +203,58 @@ mod tests {
         f.write_all(content.as_bytes()).unwrap();
         f.flush().unwrap();
         f
+    }
+
+    #[test]
+    fn resolve_web_bind_from_config_when_enabled() {
+        let cfg = write_config(
+            r#"
+[source]
+path = "/a.log"
+
+[filters]
+patterns = ["x"]
+
+[web]
+enabled = true
+bind = "127.0.0.1:19992"
+"#,
+        );
+        let args = Args {
+            config: Some(cfg.path().to_path_buf()),
+            file_path: None,
+            keyword: None,
+            tail: false,
+            out_file: None,
+            web: None,
+        };
+        let r = ResolvedConfig::resolve(&args).unwrap();
+        assert_eq!(r.web_bind.as_deref(), Some("127.0.0.1:19992"));
+    }
+
+    #[test]
+    fn resolve_web_cli_overrides_config_bind() {
+        let cfg = write_config(
+            r#"
+[source]
+path = "/a.log"
+[filters]
+patterns = ["x"]
+[web]
+enabled = true
+bind = "127.0.0.1:1"
+"#,
+        );
+        let args = Args {
+            config: Some(cfg.path().to_path_buf()),
+            file_path: None,
+            keyword: None,
+            tail: false,
+            out_file: None,
+            web: Some("127.0.0.1:19993".into()),
+        };
+        let r = ResolvedConfig::resolve(&args).unwrap();
+        assert_eq!(r.web_bind.as_deref(), Some("127.0.0.1:19993"));
     }
 
     #[test]
@@ -207,6 +313,8 @@ patterns = ["X"]
             file_path: Some("/from/cli.log".into()),
             keyword: None,
             tail: false,
+            out_file: None,
+            web: None,
         };
         let r = ResolvedConfig::resolve(&args).unwrap();
         assert_eq!(r.file_path, PathBuf::from("/from/cli.log"));
@@ -229,6 +337,8 @@ patterns = ["IGNORE"]
             file_path: None,
             keyword: Some("REAL".into()),
             tail: false,
+            out_file: None,
+            web: None,
         };
         let r = ResolvedConfig::resolve(&args).unwrap();
         assert!(r.matcher.matches_line("REAL hit"));
@@ -242,6 +352,8 @@ patterns = ["IGNORE"]
             file_path: Some("f.log".into()),
             keyword: Some("k".into()),
             tail: false,
+            out_file: None,
+            web: None,
         };
         let r = ResolvedConfig::resolve(&args).unwrap();
         assert_eq!(r.file_path, PathBuf::from("f.log"));
@@ -255,6 +367,8 @@ patterns = ["IGNORE"]
             file_path: None,
             keyword: Some("k".into()),
             tail: false,
+            out_file: None,
+            web: None,
         };
         assert!(ResolvedConfig::resolve(&args).is_err());
     }
@@ -272,6 +386,8 @@ path = "/a.log"
             file_path: None,
             keyword: None,
             tail: false,
+            out_file: None,
+            web: None,
         };
         let r = ResolvedConfig::resolve(&args).unwrap();
         assert!(r.matcher.matches_line("anything goes"));
@@ -282,6 +398,41 @@ path = "/a.log"
         let o = OutputSection::default();
         assert!(o.stdout);
         assert!(o.file.is_none());
+    }
+
+    #[test]
+    fn resolve_cli_out_file_overrides_config_output_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let from_cfg = dir.path().join("cfg_out.log");
+        let from_cli = dir.path().join("cli_out.log");
+        let log = dir.path().join("app.log");
+        std::fs::write(&log, b"x\n").unwrap();
+
+        let cfg = write_config(&format!(
+            r#"
+[source]
+path = "{}"
+
+[filters]
+patterns = ["x"]
+
+[output]
+file = "{}"
+"#,
+            log.display(),
+            from_cfg.display()
+        ));
+
+        let args = Args {
+            config: Some(cfg.path().to_path_buf()),
+            file_path: None,
+            keyword: None,
+            tail: false,
+            out_file: Some(from_cli.clone()),
+            web: None,
+        };
+        let r = ResolvedConfig::resolve(&args).unwrap();
+        assert_eq!(r.output_file.as_ref(), Some(&from_cli));
     }
 
     #[test]

@@ -1,6 +1,6 @@
 use assert_cmd::Command;
-use std::fs::write;
-use tempfile::NamedTempFile;
+use std::fs::{read_to_string, write};
+use tempfile::{tempdir, NamedTempFile};
 
 #[test]
 fn shows_filtered_log_output() {
@@ -67,5 +67,29 @@ mode = "any"
             || err.contains("matched log line")
             || out.contains("matched log line"),
         "stderr={err:?} stdout={out:?}"
+    );
+}
+
+#[test]
+fn writes_matches_to_out_file() {
+    let dir = tempdir().unwrap();
+    let log_path = dir.path().join("in.log");
+    write(&log_path, "INFO: a\nERROR: keep me\nWARN: b\n").unwrap();
+    let out_path = dir.path().join("filtered.log");
+
+    Command::cargo_bin("rustlog")
+        .unwrap()
+        .arg(&log_path)
+        .arg("ERROR")
+        .arg("-o")
+        .arg(&out_path)
+        .env("RUST_LOG", "warn")
+        .assert()
+        .success();
+
+    let body = read_to_string(&out_path).unwrap();
+    assert!(
+        body.contains("ERROR: keep me"),
+        "expected match in output file, got {body:?}"
     );
 }
