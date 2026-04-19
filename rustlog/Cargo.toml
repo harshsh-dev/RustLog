@@ -3,6 +3,11 @@ name = "rustlog"
 version = "0.1.0"
 edition = "2024"
 
+[features]
+default = []
+# Requires a system librdkafka (e.g. `brew install librdkafka` on macOS).
+kafka = ["dep:rdkafka"]
+
 [dependencies]
 tokio = { version = "1", features = [
     "rt-multi-thread",
@@ -12,6 +17,7 @@ tokio = { version = "1", features = [
     "fs",
     "io-util",
     "time",
+    "net",
 ] }
 clap = { version = "4.5", features = ["derive"] }
 anyhow = "1.0"
@@ -20,8 +26,17 @@ tracing-subscriber = { version = "0.3.19", features = ["env-filter", "fmt"] }
 serde = { version = "1.0", features = ["derive"] }
 toml = "0.8"
 regex = "1"
+axum = { version = "0.7", features = ["ws"] }
+tower-http = { version = "0.5", features = ["trace"] }
+rdkafka = { version = "0.36", optional = true, default-features = false, features = [
+    "tokio",
+    "dynamic-linking",
+] }
 
 [dev-dependencies]
 assert_cmd = "2"
 predicates = "3"
 tempfile = "3"
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"
+axum = { version = "0.7", features = ["ws"] }

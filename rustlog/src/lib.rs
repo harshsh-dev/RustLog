@@ -1,21 +1,24 @@
 pub mod args;
 pub mod config;
 pub mod filter;
+pub mod kafka_sink;
 pub mod matcher;
 pub mod reader;
 pub mod reader_async;
 pub mod sink;
 pub mod transform;
+pub mod web_dashboard;
 
+use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-use transform::TransformArc;
-
-use anyhow::Result;
+use anyhow::{Context, Result};
 use tokio::signal;
-use tokio::sync::mpsc;
+use tokio::sync::{broadcast, mpsc};
 use tracing_subscriber::{fmt, EnvFilter};
+
+use transform::TransformArc;
 
 fn init_tracing() {
     let subscriber = fmt()
@@ -41,20 +44,40 @@ pub async fn run() -> Result<()> {
     tracing::info!(
         file = %resolved.file_path.display(),
         tail = args.tail,
+        web = ?resolved.web_bind,
+        kafka_enabled = resolved.kafka.enabled,
         "Resolved configuration"
     );
 
     let matcher = resolved.matcher.arc();
     let pipeline: Arc<Vec<TransformArc>> =
         Arc::new(transform::build_pipeline(&resolved.transforms)?);
+    let kafka = kafka_sink::KafkaPipeline::from_section(&resolved.kafka)?;
     let hub = sink::SinkHub::new(resolved.stdout, resolved.output_file.clone()).await?;
+
+    let (broadcast_tx, _) = broadcast::channel::<String>(256);
+    let web_addr: Option<SocketAddr> = match &resolved.web_bind {
+        Some(s) => Some(
+            s.parse()
+                .with_context(|| format!("invalid web bind address {s:?}"))?,
+        ),
+        None => None,
+    };
+    let _web_task = if let Some(addr) = web_addr {
+        let tx = broadcast_tx.clone();
+        Some(tokio::spawn(async move {
+            if let Err(e) = web_dashboard::serve(addr, tx).await {
+                tracing::error!(error = %e, "Web dashboard stopped");
+            }
+        }))
+    } else {
+        None
+    };
 
     let (tx, mut rx) = mpsc::channel(64);
     let file_path = resolved.file_path.clone();
     let running = Arc::new(AtomicBool::new(true));
 
-    // Only install Ctrl+C for follow mode. In some non-interactive environments `ctrl_c()`
-    // can resolve immediately; that would clear `running` before a one-shot file read starts.
     if args.tail {
         let r = running.clone();
         tokio::spawn(async move {
@@ -88,8 +111,13 @@ pub async fn run() -> Result<()> {
         let Some(out) = transform::apply_pipeline(&line, pipeline.as_ref()) else {
             continue;
         };
+        let _ = broadcast_tx.send(out.clone());
         if let Err(e) = hub.emit(&out).await {
             tracing::error!(error = %e, "sink emit failed");
+            return Err(e);
+        }
+        if let Err(e) = kafka.publish(&out).await {
+            tracing::error!(error = %e, "Kafka publish failed");
             return Err(e);
         }
     }
