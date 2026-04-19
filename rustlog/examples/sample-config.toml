@@ -14,3 +14,10 @@ use_regex = false
 [output]
 stdout = true
 # file = "filtered.log"   # append matched lines here
+
+# Optional transform pipeline (built-in plugins only).
+# [[transforms]]
+# name = "trim"
+#
+# [[transforms]]
+# name = "lowercase"

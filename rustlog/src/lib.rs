@@ -5,9 +5,12 @@ pub mod matcher;
 pub mod reader;
 pub mod reader_async;
 pub mod sink;
+pub mod transform;
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+
+use transform::TransformArc;
 
 use anyhow::Result;
 use tokio::signal;
@@ -42,6 +45,8 @@ pub async fn run() -> Result<()> {
     );
 
     let matcher = resolved.matcher.arc();
+    let pipeline: Arc<Vec<TransformArc>> =
+        Arc::new(transform::build_pipeline(&resolved.transforms)?);
     let hub = sink::SinkHub::new(resolved.stdout, resolved.output_file.clone()).await?;
 
     let (tx, mut rx) = mpsc::channel(64);
@@ -80,7 +85,10 @@ pub async fn run() -> Result<()> {
     });
 
     while let Some(line) = rx.recv().await {
-        if let Err(e) = hub.emit(&line).await {
+        let Some(out) = transform::apply_pipeline(&line, pipeline.as_ref()) else {
+            continue;
+        };
+        if let Err(e) = hub.emit(&out).await {
             tracing::error!(error = %e, "sink emit failed");
             return Err(e);
         }

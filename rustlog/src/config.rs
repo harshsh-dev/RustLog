@@ -6,6 +6,7 @@ use anyhow::{Context, Result};
 use serde::Deserialize;
 
 use crate::matcher::{LineMatcher, MatchMode};
+use crate::transform::TransformSpec;
 
 #[derive(Debug, Deserialize, Default, Clone)]
 pub struct SourceSection {
@@ -54,6 +55,8 @@ pub struct FileConfig {
     pub filters: FiltersSection,
     #[serde(default)]
     pub output: OutputSection,
+    #[serde(default)]
+    pub transforms: Vec<TransformSpec>,
 }
 
 impl FileConfig {
@@ -71,6 +74,7 @@ pub struct ResolvedConfig {
     pub matcher: LineMatcher,
     pub stdout: bool,
     pub output_file: Option<PathBuf>,
+    pub transforms: Vec<TransformSpec>,
 }
 
 impl ResolvedConfig {
@@ -118,11 +122,17 @@ impl ResolvedConfig {
         let stdout = output.stdout;
         let output_file = output.file.map(PathBuf::from);
 
+        let transforms = file_cfg
+            .as_ref()
+            .map(|c| c.transforms.clone())
+            .unwrap_or_default();
+
         Ok(Self {
             file_path: PathBuf::from(file_path),
             matcher,
             stdout,
             output_file,
+            transforms,
         })
     }
 }
@@ -139,6 +149,30 @@ mod tests {
         f.write_all(content.as_bytes()).unwrap();
         f.flush().unwrap();
         f
+    }
+
+    #[test]
+    fn load_config_with_transforms_array() {
+        let f = write_config(
+            r#"
+[source]
+path = "/tmp/a.log"
+
+[filters]
+patterns = ["E"]
+
+[[transforms]]
+name = "trim"
+
+[[transforms]]
+name = "prepend"
+arg = ">> "
+"#,
+        );
+        let c = FileConfig::load(f.path()).unwrap();
+        assert_eq!(c.transforms.len(), 2);
+        assert_eq!(c.transforms[0].name, "trim");
+        assert_eq!(c.transforms[1].arg.as_deref(), Some(">> "));
     }
 
     #[test]
