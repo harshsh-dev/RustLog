@@ -1,17 +1,24 @@
+use std::path::PathBuf;
+
 use clap::Parser;
 
-/// Simple log reader that filters by keyword.
-#[derive(Parser, Debug)]
+/// Log reader: filter a file once or follow with `--tail`. Optional `--config` TOML merges with CLI.
+#[derive(Parser, Debug, Clone)]
 #[command(author, version, about)]
 pub struct Args {
-    /// Path to the log file
-    pub file_path: String,
+    /// TOML configuration file (`[source]`, `[filters]`, `[output]`).
+    #[arg(short = 'C', long = "config", value_name = "FILE")]
+    pub config: Option<PathBuf>,
 
+    /// Log file path (overrides `[source].path` from config when both are set).
+    #[arg(value_name = "FILE")]
+    pub file_path: Option<String>,
 
-    /// Keyword to filter log lines
-    pub keyword: String,
+    /// Filter keyword (overrides `[filters].patterns` from config when set).
+    #[arg(value_name = "KEYWORD")]
+    pub keyword: Option<String>,
 
-    ///Enable rela-time log tailing
+    /// Follow the file for new lines (`tail -f` semantics).
     #[arg(short, long)]
     pub tail: bool,
 }

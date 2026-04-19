@@ -9,11 +9,11 @@ use std::time::Duration;
 
 use anyhow::Result;
 
-use crate::filter::line_matches;
+use crate::matcher::LineMatcher;
 
 /// Streams a log file with **O(1)** memory: one line buffer is reused for the whole file.
-/// Only lines containing `keyword` invoke `on_match` (trimmed, without trailing newline / CRLF).
-pub fn for_each_matching_line<P, F>(file_path: P, keyword: &str, mut on_match: F) -> Result<()>
+/// Invokes `on_match` for each line where `matcher` matches (trimmed line, no trailing newline).
+pub fn for_each_matching_line<P, F>(file_path: P, matcher: &LineMatcher, mut on_match: F) -> Result<()>
 where
     P: AsRef<Path>,
     F: FnMut(&str),
@@ -28,7 +28,7 @@ where
             break;
         }
         let trimmed = line.trim_end();
-        if line_matches(trimmed, keyword) {
+        if matcher.matches_line(trimmed) {
             on_match(trimmed);
         }
     }
@@ -37,12 +37,12 @@ where
 
 /// Blocking `tail -f` style reader: starts at **end of file** and forwards new complete lines.
 ///
-/// `line_filter`: `None` forwards every line; `Some(k)` only lines containing `k`.
+/// `line_filter`: `None` forwards every line; `Some(m)` only lines matched by `m`.
 pub fn tail_file<P: AsRef<Path>>(
     file_path: P,
     tx: Sender<String>,
     running: Arc<AtomicBool>,
-    line_filter: Option<&str>,
+    line_filter: Option<Arc<LineMatcher>>,
 ) -> Result<()> {
     let mut file = File::open(file_path)?;
     file.seek(SeekFrom::End(0))?;
@@ -62,8 +62,8 @@ pub fn tail_file<P: AsRef<Path>>(
             if trimmed_len == 0 {
                 continue;
             }
-            if let Some(kw) = line_filter {
-                if !line[..trimmed_len].contains(kw) {
+            if let Some(m) = &line_filter {
+                if !m.matches_line(&line[..trimmed_len]) {
                     continue;
                 }
             }

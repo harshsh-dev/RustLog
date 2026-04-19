@@ -1,9 +1,11 @@
 pub mod args;
+pub mod config;
 pub mod filter;
+pub mod matcher;
 pub mod reader;
 pub mod reader_async;
+pub mod sink;
 
-use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
@@ -32,55 +34,55 @@ pub async fn run() -> Result<()> {
     let args = args::parse_args();
     tracing::info!(?args, "Starting RustLog");
 
+    let resolved = config::ResolvedConfig::resolve(&args)?;
+    tracing::info!(
+        file = %resolved.file_path.display(),
+        tail = args.tail,
+        "Resolved configuration"
+    );
+
+    let matcher = resolved.matcher.arc();
+    let hub = sink::SinkHub::new(resolved.stdout, resolved.output_file.clone()).await?;
+
+    let (tx, mut rx) = mpsc::channel(64);
+    let file_path = resolved.file_path.clone();
+    let running = Arc::new(AtomicBool::new(true));
+
+    // Only install Ctrl+C for follow mode. In some non-interactive environments `ctrl_c()`
+    // can resolve immediately; that would clear `running` before a one-shot file read starts.
     if args.tail {
-        tracing::info!(
-            file = %Path::new(&args.file_path).display(),
-            "Tail mode activated"
-        );
-        let (tx, mut rx) = mpsc::channel(64);
-        let file_path = args.file_path.clone();
-        let keyword = args.keyword.clone();
-
-        let running = Arc::new(AtomicBool::new(true));
-        let r = running.clone();
-
-        tokio::spawn(async move {
-            if signal::ctrl_c().await.is_err() {
-                tracing::warn!("Ctrl+C handler unavailable");
-            } else {
-                tracing::info!("Shutting down gracefully...");
-            }
-            r.store(false, Ordering::Relaxed);
-        });
-
         let r = running.clone();
         tokio::spawn(async move {
-            if let Err(e) = reader_async::tail_file_async(
-                file_path,
-                tx,
-                r,
-                Some(keyword.as_str()),
-            )
-            .await
-            {
-                tracing::error!(error = %e, "Tailing failed");
+            match signal::ctrl_c().await {
+                Ok(()) => {
+                    tracing::info!("Shutting down gracefully...");
+                    r.store(false, Ordering::Relaxed);
+                }
+                Err(_) => tracing::warn!(
+                    "Ctrl+C handler unavailable; tail task may run until process is killed"
+                ),
             }
         });
+    }
 
-        while let Some(line) = rx.recv().await {
-            tracing::info!(target: "filtered", %line);
+    let r = running.clone();
+    let tail_flag = args.tail;
+    let m = matcher.clone();
+    tokio::spawn(async move {
+        let res = if tail_flag {
+            reader_async::tail_file_async(file_path, tx, r, Some(m)).await
+        } else {
+            reader_async::stream_file_lines_once(file_path, tx, r, Some(m)).await
+        };
+        if let Err(e) = res {
+            tracing::error!(error = %e, "Reader task failed");
         }
-    } else {
-        tracing::info!(
-            file = %Path::new(&args.file_path).display(),
-            "Non-tail mode: streaming file"
-        );
-        if let Err(e) =
-            reader::for_each_matching_line(&args.file_path, &args.keyword, |line| {
-                tracing::info!(target: "filtered", line = %line);
-            })
-        {
-            tracing::error!(error = %e, "Failed to read file");
+    });
+
+    while let Some(line) = rx.recv().await {
+        if let Err(e) = hub.emit(&line).await {
+            tracing::error!(error = %e, "sink emit failed");
+            return Err(e);
         }
     }
 

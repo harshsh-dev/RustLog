@@ -1,0 +1,16 @@
+# Example RustLog configuration (use with: rustlog -C examples/sample-config.toml)
+#
+# CLI positionals still override [source].path and [filters] when provided.
+
+[source]
+path = "sample/sample.log"
+
+[filters]
+patterns = ["ERROR", "WARN"]
+use_regex = false
+# mode = "any"   # default: line matches if it contains any pattern
+# mode = "all"   # line must contain every pattern
+
+[output]
+stdout = true
+# file = "filtered.log"   # append matched lines here
